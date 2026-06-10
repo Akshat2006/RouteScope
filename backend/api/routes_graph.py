@@ -52,10 +52,13 @@ async def refresh_topology():
     from ..api.websocket import ws_manager
     from ..engine.metrics_engine import compute_graph_health
     health = compute_graph_health(graph_builder.snapshot())
+    from ..graph_storage import tier_selector
     await ws_manager.broadcast({
         "type": "graph_update",
         "data": data,
         "health": health,
+        "storage_tier": tier_selector.active_tier,
+        "storage_backend": tier_selector.backend_name,
     })
 
     return {
@@ -63,6 +66,47 @@ async def refresh_topology():
         "node_count": len(data["nodes"]),
         "edge_count": len(data["edges"]),
         "live": gns3_client.is_live,
+        "storage_tier": tier_selector.active_tier,
+        "storage_backend": tier_selector.backend_name,
+    }
+
+
+@router.post("/graph/tier")
+async def switch_tier(body: dict):
+    """
+    Switch storage tier at runtime without restart.
+    Body: {"tier": 1} or {"tier": 2}
+    """
+    from ..graph_storage import tier_selector
+    from ..config import settings
+    from ..api.websocket import ws_manager
+
+    tier = int(body.get("tier", 1))
+    if tier not in (1, 2):
+        return {"success": False, "error": "tier must be 1 or 2"}
+
+    graph = graph_builder.snapshot()
+
+    if tier == 1:
+        await tier_selector._activate_tier1(graph)
+    else:
+        await tier_selector._activate_tier2(graph, settings)
+
+    data = graph_builder.to_dict()
+    health = compute_graph_health(graph_builder.snapshot())
+    await ws_manager.broadcast({
+        "type": "graph_update",
+        "data": data,
+        "health": health,
+        "storage_tier": tier_selector.active_tier,
+        "storage_backend": tier_selector.backend_name,
+    })
+
+    return {
+        "success": True,
+        "active_tier": tier_selector.active_tier,
+        "backend": tier_selector.backend_name,
+        "node_count": graph.number_of_nodes(),
     }
 
 

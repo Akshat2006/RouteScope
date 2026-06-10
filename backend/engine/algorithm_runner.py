@@ -13,8 +13,7 @@ Graph source: tier_selector.get_graph(source, destination)
 """
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, TimeoutError as FuturesTimeout
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 import networkx as nx
 
@@ -25,21 +24,8 @@ from ..engine.metrics_engine import compute_survivability
 
 logger = logging.getLogger(__name__)
 
-# Tier 1: shared thread pool, sized to algorithm count
+# Shared thread pool for all algorithm execution across all tiers
 _thread_executor = ThreadPoolExecutor(max_workers=len(ALGORITHM_REGISTRY) + 2)
-# Tier 2: process pool created lazily on first Tier 2 request
-_process_executor: Optional[ProcessPoolExecutor] = None
-
-
-def _get_executor(use_processes: bool):
-    global _process_executor
-    if use_processes:
-        if _process_executor is None:
-            _process_executor = ProcessPoolExecutor(
-                max_workers=len(ALGORITHM_REGISTRY) + 2
-            )
-        return _process_executor
-    return _thread_executor
 
 
 def _run_single(algo, graph: nx.Graph, source: str, destination: str) -> AlgorithmResult:
@@ -75,9 +61,10 @@ async def run_all_algorithms(
 
     t_total = time.perf_counter()
 
-    # Tier 2+ uses ProcessPoolExecutor to bypass GIL for CPU-bound graph traversal
-    use_processes = tier_selector.active_tier >= 2
-    executor = _get_executor(use_processes)
+    # Always use ThreadPoolExecutor for algorithm execution — algorithm objects
+    # are not picklable so ProcessPoolExecutor would silently fail.
+    # Tier selection affects graph *storage and retrieval* only.
+    executor = _thread_executor
 
     # Submit all algorithms simultaneously — identical graph copy per algorithm
     futures = {
@@ -118,6 +105,8 @@ async def run_all_algorithms_for_nodes(source: str, destination: str) -> dict:
     """
     Entry point for WebSocket 'compute' messages.
     Fetches the tier-appropriate graph from Layer 2 then runs all algorithms.
+    Tier 1: full deep-copied NetworkX graph.
+    Tier 2: ego_graph(source ∪ destination, radius=10) extracted from Neo4j.
     """
     from ..graph_storage import tier_selector
     graph = tier_selector.get_graph(source, destination)
